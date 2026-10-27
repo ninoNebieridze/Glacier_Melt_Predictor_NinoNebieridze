@@ -11,8 +11,10 @@
     4. Newton-Raphson      — Multi-threshold critical year prediction
 
   Run:
-    pip install numpy scipy matplotlib opencv-python pillow
+    pip install -r requirements.txt
     python glacier_melt_predictor.py
+
+  All generated images are written to outputs/.
 =============================================================
 """
 
@@ -38,6 +40,8 @@ IMAGE_FILES = {
 }
 
 THRESHOLDS = [0.70, 0.60, 0.50, 0.40]
+
+OUTPUT_DIR = "outputs"
 
 # ── Scale factor: pixels → km² ──
 # Images are 1086x730 px and cover ~18km x 12km geographic area
@@ -105,8 +109,9 @@ def extract_glacier_area(image_path, year, debug=False):
         full_canny = img.copy()
         cv2.rectangle(full_canny, (x1, y1), (x2, y2), (255, 100, 0), 3)
         full_canny[y1:y2, x1:x2] = canny_vis
-        cv2.imwrite("canny_2015_visualization.jpg", full_canny)
-        print("  [Canny] Saved canny_2015_visualization.jpg")
+        canny_path = os.path.join(OUTPUT_DIR, "canny_2015_visualization.jpg")
+        cv2.imwrite(canny_path, full_canny)
+        print(f"  [Canny] Saved {canny_path}")
 
     if debug:
         full_debug = img.copy()
@@ -114,7 +119,7 @@ def extract_glacier_area(image_path, year, debug=False):
         colored = np.zeros_like(roi)
         colored[mask > 0] = [0, 255, 0]
         full_debug[y1:y2, x1:x2] = cv2.addWeighted(roi, 0.6, colored, 0.4, 0)
-        cv2.imwrite(f"debug_{int(year)}.jpg", full_debug)
+        cv2.imwrite(os.path.join(OUTPUT_DIR, f"debug_{int(year)}.jpg"), full_debug)
 
     return area_pixels
 
@@ -186,14 +191,21 @@ def finite_differences(years, areas):
             h        = years[-1] - years[-2]
             dA_dt[i] = (areas[-1] - areas[-2]) / h
         else:
-            dA_dt[i] = (areas[i+1] - areas[i-1]) / (years[i+1] - years[i-1])
+            # Non-uniform 3-point formula: h1 = backward step, h2 = forward step
+            h1       = years[i]   - years[i-1]
+            h2       = years[i+1] - years[i]
+            dA_dt[i] = (h1**2 * areas[i+1] - h2**2 * areas[i-1]
+                        + (h2**2 - h1**2) * areas[i]) / (h1 * h2 * (h1 + h2))
 
     for i in range(n):
         if i == 0 or i == n - 1:
             d2A_dt2[i] = np.nan
         else:
-            h           = (years[i+1] - years[i-1]) / 2
-            d2A_dt2[i]  = (areas[i+1] - 2*areas[i] + areas[i-1]) / (h**2)
+            # Non-uniform 3-point formula: h1 = backward step, h2 = forward step
+            h1          = years[i]   - years[i-1]
+            h2          = years[i+1] - years[i]
+            d2A_dt2[i]  = 2 * ((areas[i+1] - areas[i]) / h2
+                               - (areas[i] - areas[i-1]) / h1) / (h1 + h2)
 
     return dA_dt, d2A_dt2
 
@@ -211,7 +223,8 @@ def newton_raphson(params, t0, A_critical, t_start, label="", tol=1e-6, max_iter
     t = float(t_start)
     print(f"\n  ── Newton-Raphson: {label} ──")
     print(f"  A_critical = {A_critical:.0f} px²  ({px_to_km2(A_critical):.4f} km²)")
-    print(f"  {'Iter':>4}  {'t':>10}  {'f(t)':>14}  {'f\'(t)':>14}")
+    fp_header = "f'(t)"
+    print(f"  {'Iter':>4}  {'t':>10}  {'f(t)':>14}  {fp_header:>14}")
     print(f"  {'----':>4}  {'----------':>10}  {'----------':>14}  {'----------':>14}")
 
     for i in range(max_iter):
@@ -272,7 +285,7 @@ def plot_results(years_data, areas_data, params, years_smooth, areas_smooth,
     ax1 = fig.add_subplot(gs[0, :])
     style_ax(ax1)
     ax1.fill_between(years_smooth, A_lower_km2, A_upper_km2,
-                     alpha=0.20, color=C_ICE, label='95% Confidence Band')
+                     alpha=0.20, color=C_ICE, label='Uncertainty band (±1 std. error)')
     ax1.fill_between(years_smooth, areas_smooth_km2, alpha=0.12, color=C_ICE)
     ax1.plot(years_smooth, areas_smooth_km2, color=C_ICE, linewidth=2.5,
              label=f'Fitted Exponential Decay  (R² = {r_squared:.4f})')
@@ -282,14 +295,14 @@ def plot_results(years_data, areas_data, params, years_smooth, areas_smooth,
 
     for i, (frac, crit_year) in enumerate(zip(thresholds, critical_years)):
         A_thresh_km2 = A_ref_km2 * frac
-        if 2015 < crit_year < 2100:
+        if crit_year is not None and 2015 < crit_year < 2100:
             ax1.axhline(y=A_thresh_km2, color=T_COLORS[i],
                         linestyle='--', linewidth=1.5, alpha=0.8,
                         label=f'{int(frac*100)}% threshold → {crit_year:.1f}')
             ax1.axvline(x=crit_year, color=T_COLORS[i],
                         linestyle=':', linewidth=1.5, alpha=0.6)
 
-    ax1.set_title('Rhône Glacier Area Over Time — Nonlinear Curve Fitting with Confidence Band',
+    ax1.set_title('Rhône Glacier Area Over Time — Nonlinear Curve Fitting with Uncertainty Band',
                   color=C_TEXT, fontsize=13, fontweight='bold', pad=12)
     ax1.set_xlabel('Year', color=C_TEXT, fontsize=11)
     ax1.set_ylabel('Glacier Area (km²)', color=C_TEXT, fontsize=11)
@@ -337,7 +350,7 @@ def plot_results(years_data, areas_data, params, years_smooth, areas_smooth,
                      where=(f_vals < 0),  alpha=0.15, color=C_RED)
 
     for i, (frac, crit_year) in enumerate(zip(thresholds, critical_years)):
-        if 2015 < crit_year < 2100:
+        if crit_year is not None and 2015 < crit_year < 2100:
             ax4.axvline(x=crit_year, color=T_COLORS[i],
                         linewidth=2, linestyle=':',
                         label=f'Root {int(frac*100)}%: t = {crit_year:.2f}')
@@ -352,9 +365,10 @@ def plot_results(years_data, areas_data, params, years_smooth, areas_smooth,
     fig.suptitle('GLACIER MELT RATE PREDICTOR — Rhône Glacier, Switzerland',
                  color='white', fontsize=16, fontweight='bold', y=1.01)
 
-    plt.savefig('glacier_results.png', dpi=150, bbox_inches='tight',
+    plot_path = os.path.join(OUTPUT_DIR, 'glacier_results.png')
+    plt.savefig(plot_path, dpi=150, bbox_inches='tight',
                 facecolor=fig.get_facecolor())
-    print("\n  Plot saved → glacier_results.png")
+    print(f"\n  Plot saved → {plot_path}")
     plt.show()
 
 
@@ -368,6 +382,7 @@ def main():
     print("  Numerical Analysis CP1")
     print("=" * 62)
     print(f"\n  Scale factor: 1 pixel = {KM2_PER_PIXEL:.6f} km²")
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     print("\n[STEP 1] Edge Detection → Glacier Area Extraction\n")
     years_raw, areas_raw = [], []
@@ -438,7 +453,13 @@ def main():
     for frac in THRESHOLDS:
         A_crit = A_ref * frac
         if c >= A_crit:
-            A_crit = (A_ref * frac + c) / 2
+            # The fitted curve never drops below its asymptote c, so this
+            # threshold has no root — report it instead of moving the target.
+            print(f"\n  ── {int(frac*100)}% of 2015 area ──")
+            print(f"  A_critical = {A_crit:.0f} px² ≤ asymptote c = {c:.0f} px²"
+                  f" → not reached under this model")
+            critical_years.append(None)
+            continue
         crit = newton_raphson(
             params, t0, A_crit,
             t_start=years_avg[-1] + 5,
@@ -464,7 +485,8 @@ def main():
     print()
     for frac, cy in zip(THRESHOLDS, critical_years):
         A_thresh = A_ref * frac
-        print(f"  {int(frac*100)}% threshold ({px_to_km2(A_thresh):.3f} km²) → critical year: {cy:.2f}")
+        result = f"{cy:.2f}" if cy is not None else "not reached under this model"
+        print(f"  {int(frac*100)}% threshold ({px_to_km2(A_thresh):.3f} km²) → critical year: {result}")
     print("=" * 62)
 
 
